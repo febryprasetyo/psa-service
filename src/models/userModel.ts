@@ -8,6 +8,7 @@ import {
 } from '../utils/util';
 import bcrypt from 'bcrypt';
 import jwt from 'jwt-simple';
+import { create } from 'lodash';
 class ModelUser {
   /**
    * Function handle login
@@ -20,7 +21,7 @@ class ModelUser {
       let data = await db
         .select(
           db.raw(`
-        mu.id as user_id, mu.username, mu.fullname, mu.city, mu.province, mu.password, mu.role_id, mu.is_active, mu.jwt_age, rl.role_name, mu.id_mesin
+        mu.id as user_id, mu.username, mu.fullname,  mu.password, mu.role_id, mu.is_active, mu.jwt_age, rl.role_name, mu.nama_dinas, mu.alamat
       `)
         )
         .from('users AS mu')
@@ -44,12 +45,12 @@ class ModelUser {
           user_id: data.user_id,
           username: data.username,
           fullname: data.fullname,
-          province: data.province,
-          city: data.city,
-          id_mesin: data.id_mesin,
           is_active: data.is_active,
           role_id: data.role_id,
           role_name: data.role_name,
+          alamat: data.alamat,
+          nama_dinas: data.nama_dinas,
+          created_at: moment(data.created_at).format('YYYY-MM-DD HH:mm:ss'),
         },
       };
 

@@ -1,0 +1,116 @@
+openapi: 3.0.0
+info:
+  title: Monitoring API
+  description: API untuk mendapatkan data terbaru mesin yang dimiliki oleh dinas berdasarkan `user_id`.
+  version: 1.0.0
+paths:
+  /monitoring:
+    post:
+      summary: Mendapatkan data terbaru mesin berdasarkan `dinas_id` yang didapat dari JWT.
+      description: |
+        Mengambil data mesin terbaru dari tabel `mqtt_datas` yang dimiliki oleh dinas.
+        Data di-filter berdasarkan `user_id` yang ada di dalam JWT token.
+      operationId: getMachineData
+      tags:
+        - Monitoring
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+              example: {}
+      responses:
+        '200':
+          description: Sukses mendapatkan data mesin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  total:
+                    type: integer
+                    example: 2
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          example: 1
+                        id_mesin:
+                          type: string
+                          example: '7092449043030108198'
+                        oxygen_purity:
+                          type: number
+                          format: float
+                          example: 92.3
+                        o2_tank:
+                          type: integer
+                          example: 80
+                        flow_meter:
+                          type: number
+                          format: float
+                          example: 4.5
+                        flow_meter2:
+                          type: number
+                          format: float
+                          example: 0
+                        total_flow:
+                          type: integer
+                          example: 1234
+                        running_time:
+                          type: integer
+                          example: 5012
+                        status:
+                          type: string
+                          enum:
+                            - hidup
+                            - mati
+                          example: hidup
+                        minutesDiff:
+                          type: integer
+                          example: 3
+                        last_update:
+                          type: string
+                          format: date-time
+                          example: '22/04/2025 14:31:25'
+        '401':
+          description: Unauthorized - Token tidak valid atau tidak ada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  message:
+                    type: string
+                    example: 'Unauthorized: Token tidak valid atau tidak ada'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  message:
+                    type: string
+                    example: 'Internal Server Error'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

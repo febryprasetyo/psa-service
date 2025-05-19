@@ -2,6 +2,8 @@ import * as express from 'express';
 
 //Controller
 import DataClientController from '../../controllers/DataClientController';
+import { DataMonitoringController } from '../../controllers/DataMonitoring';
+const DataMonitoringCtl = new DataMonitoringController();
 const DataClientCtl = new DataClientController();
 
 import { JwtMiddleware } from '../../middlewares/jwtMiddleware';

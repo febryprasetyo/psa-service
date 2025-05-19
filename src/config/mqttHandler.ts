@@ -1,179 +1,180 @@
 import * as Mqtt from 'mqtt';
 import { db, moment } from '../utils/util';
 import 'dotenv/config';
+import { extractSensorValues } from '../utils/mqttData';
+import { Topic1Data, Topic2Data } from '../types/types';
 
-var brokerUrl: any = process.env.MQTT_BROKER_URL;
-var options: any = {
+const brokerUrl = process.env.MQTT_BROKER_URL;
+const options = {
   port: parseInt(process.env.MQTT_PORT || '1883'),
   keepalive: parseInt(process.env.MQTT_KEEP_ALIVE || '60'),
   username: process.env.MQTT_USER,
   password: process.env.MQTT_PASSWORD,
 };
 
+interface TopicMapping {
+  topic1: string;
+  topic2: string;
+}
+
 class MqttHandler {
   public mqttClient: any;
-  public mqttTopic: any;
+  public mqttTopics: TopicMapping[] = [];
 
-  async getDataTopic() {
+  async getAllTopics(
+    role_id: string,
+    user_id?: number
+  ): Promise<TopicMapping[]> {
     try {
-      let data = await db
-        .select(db.raw(`jsonb_agg(distinct id_mesin) as id_mesin`))
-        .from('users')
-        .whereRaw(`role_id = ? and is_active`, ['user']);
-      return data;
+      let rows: any[] = [];
+
+      if (role_id === 'adm') {
+        rows = await db('machines').select('id_mesin');
+      } else {
+        rows = await db('user_machines')
+          .join('users', 'user_machines.user_id', 'users.id')
+          .select('user_machines.id_mesin')
+          .where('users.role_id', 'user')
+          .andWhere('users.is_active', true)
+          .andWhere('users.id', user_id);
+      }
+
+      return rows.map((row) => ({
+        topic1: `data/psa/mgm/${row.id_mesin}`,
+        topic2: row.id_mesin,
+      }));
     } catch (error) {
-      console.log(error);
-      throw error;
+      console.error('❌ Error getAllTopics:', error);
+      return [];
     }
   }
 
   async connect() {
-    // Get Data Topic
-    this.mqttTopic = await this.getDataTopic();
-    this.mqttTopic = this.mqttTopic[0].id_mesin;
-    console.log(
-      `------------------ Data topic : ${this.mqttTopic} ------------------`
-    );
-    if (!this.mqttTopic) {
-      console.log('------------------ Data topic not found ------------------');
+    const role_id = process.env.USER_ROLE_ID || 'adm';
+    const user_id = process.env.USER_ID
+      ? parseInt(process.env.USER_ID)
+      : undefined;
+
+    this.mqttTopics = await this.getAllTopics(role_id, user_id);
+
+    if (!this.mqttTopics.length) {
+      console.warn('⚠️ No topics to subscribe.');
       return;
     }
 
-    // Connect MQTT with credentials
+    if (!brokerUrl) {
+      throw new Error(
+        'MQTT_BROKER_URL is not defined in the environment variables'
+      );
+    }
+
     this.mqttClient = Mqtt.connect(brokerUrl, options);
 
-    // Handle MQTT error callback
-    this.mqttClient.on('error', (err: any) => {
-      console.error('MQTT Error:', err);
-      this.mqttClient.end();
-    });
-
-    // Handle connection
     this.mqttClient.on('connect', () => {
-      console.log(`MQTT client connected`);
+      console.log('✅ MQTT connected');
 
-      // Subscribe to multiple topics
-      this.mqttTopic.forEach((topic: any) => {
-        this.mqttClient.subscribe(topic, (err: any, granted: any) => {
-          if (err) {
-            console.error(`Failed to subscribe to topic ${topic}:`, err);
-          } else {
-            console.log(`Subscribed to topic: ${topic}`);
-          }
+      this.mqttTopics.forEach(({ topic1, topic2 }) => {
+        [topic1, topic2].forEach((topic) => {
+          this.mqttClient.subscribe(topic, (err: Error | null) => {
+            if (err) {
+              console.error(`❌ Failed to subscribe to ${topic}`, err);
+            } else {
+              console.log(`✅ Subscribed to ${topic}`);
+            }
+          });
         });
       });
     });
 
-    // Handle incoming messages
-    this.mqttClient.on('message', async (topic: any, message: any) => {
-      console.log('Received message');
-      console.log('Topic:', topic);
-      console.log('Message:', message.toString());
+    this.mqttClient.on('message', async (topic: string, message: Buffer) => {
+      console.log(`📩 [${topic}] ${message.toString()}`);
+      const payload = message.toString();
       let trx;
+
       try {
         trx = await db.transaction();
-        const jsonString = JSON.parse(message.toString());
-        // console.log('Parsed JSON:', jsonString);
-        let val = jsonString['data'];
-        console.log(
-          `----------------------- Process Check Data ${topic} -----------------------`
-        );
-        let check = await trx
-          .select(trx.raw(`*`))
-          .from('mqtt_storage_data')
-          .whereRaw(`id_mesin = ? and waktu_mesin = ?`, [
-            topic,
-            jsonString['time'],
-          ]);
+        const jsonData = JSON.parse(payload);
+        const id_mesin = topic.includes('/') ? topic.split('/').pop() : topic;
 
-        if (check.length === 0) {
-          console.log(
-            `----------------------- Process Insert Data ${topic} -----------------------`
-          );
-          await trx('mqtt_storage_data').insert({
-            id_mesin: topic || '-',
-            waktu_mesin: jsonString['time'],
-            cold_storage_fan_overload: val['#Cold storage fan overload'],
-            cold_storage_high_t_alarm: val['#Cold storage high T alarm'],
-            cold_storage_low_t_alarm: val['#Cold storage low T alarm'],
-            compressor_overload: val['#Compressor overload'],
-            door_open_alarm: val['#Door open alarm'],
-            emergency_stop_protection: val['#Emergency stop protection'],
-            feedback_signal_b_protection: val['#Feedback signal B protection'],
-            high_t_timeout_alarm: val['#High T timeout alarm'],
-            high_and_low_voltage_switch: val['#High and low voltage switch'],
-            integrated_power_protection: val['#Integrated power protection'],
-            low_t_timeout_alarm: val['#Low T timeout alarm'],
-            module_protection: val['#Module protection'],
-            oil_pressure_differential: val['#Oil pressure differential'],
-            overload_of_condensing_fan: val['#Overload of condensing fan'],
-            analog_detection_cycle: val['Analog detection cycle'],
-            clear_all_occurrences: val['Clear all occurrences'],
-            clear_production_records: val['Clear production records'],
-            clear_todays_frequency: val["Clear today's frequency"],
-            cold_storage_t1_correction: val['Cold storage T 1 correction'],
-            cold_storage_t2_correction: val['Cold storage T 2 correction'],
-            cold_storage_high_t_alarm_threshold:
-              val['Cold storage high T alarm'],
-            cold_storage_low_t_alarm_threshold: val['Cold storage low T alarm'],
-            cold_storage_temperature_1: val['Cold storage temperature 1'],
-            cold_storage_temperature_2: val['Cold storage temperature 2'],
-            compressor_status: val['Compressor status'],
-            condensation_stop_delay: val['Condensation stop delay'],
-            cooling_start_up_temperature: val['Cooling start-up temperature'],
-            cooling_stop_temperature: val['Cooling stop temperature'],
-            defrosting_heating_time: val['Defrosting heating time'],
-            defrosting_temperature: val['Defrosting temperature'],
-            end_temperature_of_defrosting: val['End temperature of defrosting'],
-            equipment_situation: val['Equipment situation'],
-            fan_cycle_on_time: val['Fan cycle on time'],
-            fan_cycle_shutdown_time: val['Fan cycle shutdown time'],
-            fault_detection_delay: val['Fault detection delay'],
-            frost_and_water_dripping_time: val['Frost and water dripping time'],
-            frost_interval_time: val['Frost interval time'],
-            frost_temperature_correction: val['Frost temperature correction'],
-            hydraulic_valve: val['Hydraulic valve'],
-            manual_defrosting: val['Manual defrosting'],
-            number_of_door_openings_today: val['Number of door openings today'],
-            press: val['Press'],
-            press_running_time_h: val['Press running time H'],
-            press_running_time_m: val['Press running time M'],
-            record_production_volume: val['Record production volume'],
-            shutdown_protection_time: val['Shutdown protection time'],
-            starting_system: val['Starting system'],
-            stop_system: val['Stop System'],
-            todays_output: val["Today's output"],
-            total_number_of_door_openings: val['Total number of door openings'],
-            unit_power_on_delay: val['Unit power on delay'],
-            warehouse_t_timeout_alarm: val['Warehouse T timeout alarm'],
-            alarm_silence: val['alarm silence'],
-            average_temperature: val['average temperature'],
-            condensing_fan: val['condensing fan'],
-            door_open_alarm_delay: val['door open alarm delay'],
-            drip: val['drip'],
-            fan: val['fan'],
-            fan_delay_the_start_time: val['fan Delay the start time'],
-            fan_delayed_shutdown_time: val['fan Delayed shutdown time'],
-            fault_reset: val['fault reset'],
-            production: val['production'],
-            shutdown_protection_time_dup: val['shutdown protection time'],
-            total_output: val['total output'],
-          });
+        if (topic.startsWith('data/psa/mgm/')) {
+          // ➕ TOPIC 1
+          const waktu_mesin = jsonData['_terminalTime'] || moment().format();
+          const group_name = jsonData['_groupName'] || topic;
+
+          const mesinInfo = await trx('machines')
+            .select('nama_dinas')
+            .where('id_mesin', id_mesin)
+            .first();
+          const nama_dinas = mesinInfo?.nama_dinas || null;
+
+          const dataToInsert = {
+            id_mesin,
+            waktu_mesin,
+            oxygen_purity:
+              jsonData['Schneider_PLC_OXYGEN_PURITY'].toFixed(2) || null,
+            o2_tank:
+              jsonData['Schneider_PLC_MF350_RESULT_O2_TANK'].toFixed(2) || null,
+            flow_meter: jsonData['Schneider_PLC_FLOW_METER'].toFixed(2) || null,
+            flow_meter2:
+              jsonData['Schneider_PLC_FLOWMETER2'].toFixed(2) || null,
+            total_flow: jsonData['Schneider_PLC_TOTAL_FLOW'].toFixed(2) || null,
+            running_time:
+              jsonData['Schneider_PLC_MF510_RUNING_TIME'].toFixed(2) || null,
+            nama_dinas,
+            created_at: moment().format(),
+          };
+
+          await trx('mqtt_datas').insert(dataToInsert);
+          console.log(`✅ Inserted Topic 1 data for ${id_mesin}`);
+        } else {
+          // ➕ TOPIC 2
+          const extracted = extractSensorValues(jsonData as Topic2Data);
+
+          const mesinInfo = await trx('machines')
+            .select('nama_dinas')
+            .where('id_mesin', id_mesin)
+            .first();
+          const nama_dinas = mesinInfo?.nama_dinas || null;
+
+          const dataToInsert = {
+            id_mesin,
+            waktu_mesin: moment().format(),
+            oxygen_purity: extracted.purity?.toFixed(2),
+            o2_tank: extracted.o2Tank?.toFixed(2),
+            flow_meter: null,
+            flow_meter2: null,
+            total_flow: extracted.totalFlow?.toFixed(2),
+            running_time: extracted.runHour?.toFixed(2),
+            nama_dinas: nama_dinas,
+            group_name: null,
+            created_at: moment().format(),
+          };
+
+          await trx('mqtt_datas').insert(dataToInsert);
+          console.log(`✅ Inserted Topic 2 data (combined) for ${id_mesin}`);
         }
-        console.log(
-          `----------------------- Finish Insert Data ${topic} -----------------------`
-        );
 
         await trx.commit();
       } catch (err) {
-        if (trx) trx.rollback();
-        console.error('Failed to parse message:', err);
+        if (trx) await trx.rollback();
+        console.error('❌ Failed to insert MQTT data:', err);
       }
     });
 
-    // Handle MQTT client close
+    this.mqttClient.on('reconnect', () => {
+      console.log('🔁 Reconnecting to MQTT broker...');
+    });
+
+    this.mqttClient.on('offline', () => {
+      console.warn('⚠️ MQTT client is offline');
+    });
+
     this.mqttClient.on('close', () => {
-      console.log(`MQTT client disconnected`);
+      console.warn('🔌 MQTT connection closed');
+    });
+
+    this.mqttClient.on('error', (err: Error) => {
+      console.error('❌ MQTT Error:', err.message);
     });
   }
 }
