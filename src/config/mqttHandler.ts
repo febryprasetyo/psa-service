@@ -40,7 +40,7 @@ class MqttHandler {
       }
 
       return rows.map((row) => ({
-        topic1: `data/psa/mgm/${row.id_mesin}`,
+        topic1: `data/psa/O2generatorMGM/${row.id_mesin}`,
         topic2: row.id_mesin,
       }));
     } catch (error) {
