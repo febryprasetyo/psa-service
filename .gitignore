@@ -5,7 +5,9 @@ package-lock.json
 # Typescript build directory
 build
 
+
 # Environment variables, never commit this file
+.env
 
 .vscode
 /public/img/mockups/
