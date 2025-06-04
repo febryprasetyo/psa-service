@@ -260,7 +260,7 @@ class MqttController {
    */
   async handleCreateMachine(req: any, res: any) {
     try {
-      const { id_mesin, dinas_id } = req.body;
+      const { id_mesin, dinas_id, manufacture } = req.body;
 
       if (!id_mesin || !dinas_id) {
         return sendResponseCustom(res, {
@@ -291,6 +291,7 @@ class MqttController {
         dinas_id,
         created_at: now,
         updated_at: now,
+        manufacture: manufacture,
       };
 
       await db('machines').insert(machineData);
@@ -389,7 +390,13 @@ class MqttController {
 
       // Query data mesin
       const data = await db
-        .select('m.id', 'm.id_mesin', 'm.nama_dinas', 'm.alamat')
+        .select(
+          'm.id',
+          'm.id_mesin',
+          'm.nama_dinas',
+          'm.alamat',
+          'm.manufacture'
+        )
         .from('machines AS m')
         .orderBy('m.created_at', 'desc')
         .limit(limit)

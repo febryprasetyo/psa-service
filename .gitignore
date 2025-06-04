@@ -6,13 +6,10 @@ package-lock.json
 build
 
 # Environment variables, never commit this file
-.env
 
 .vscode
-pm2.json
 /public/img/mockups/
 
 #log files and asset files
 /assets/
 
-runbuild.sh

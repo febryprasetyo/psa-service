@@ -2,6 +2,7 @@ import { Topic2Data } from '../types/types';
 
 export function extractSensorValues(data: Topic2Data) {
   const getVal = (id: string): number | null => {
+    if (!Array.isArray(data.sensorDatas)) return null;
     const entry = data.sensorDatas.find((d) => d.sensorsId === id);
     return entry?.value ? parseFloat(entry.value) : null;
   };
