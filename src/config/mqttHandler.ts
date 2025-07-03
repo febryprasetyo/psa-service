@@ -7,11 +7,12 @@ import { chunk } from 'lodash';
 
 /**
  * Handler MQTT → PostgreSQL
- * --------------------------------------
- * - Satu baris per `id_mesin` per‑menit disimpan di buffer, kemudian
- *   dibulk‑insert tiap `INSERT_INTERVAL_MS`.
- * - Log akan menampilkan jumlah baris & daftar `id_mesin` yang berhasil
- *   tersimpan setiap flush.
+ * -------------------------------------------------------------
+ * 1. Buffer menyimpan SATU baris per‑topic per‑menit.
+ * 2. Tiap `INSERT_INTERVAL_MS` buffer diflush secara bulk.
+ * 3. Setelah insert, logger menampilkan ¬jumlah baris YANG BENAR‑BENAR
+ *    tersimpan + daftar unik `id_mesin`‑nya. Jika jumlah 0, berarti insert
+ *    gagal (silent) ➜ perlu investigasi DB‑server.
  */
 
 const brokerUrl = process.env.MQTT_BROKER_URL!;
@@ -33,15 +34,13 @@ function safeFixed(value: any, decimal = 2): string | null {
 class MqttHandler {
   public mqttClient: Mqtt.MqttClient | undefined;
   /**
-   * buffer: key = topic, value = { minute, data }
-   * hanya simpan satu baris per‑topic per‑menit
+   * key = topic, value = { minute, data }
    */
   private buffers: Map<string, { minute: string; data: any }> = new Map();
 
-  /**
-   * Ambil seluruh topic dari tabel machines.
-   * Untuk manufacture = "mgm", format topic = `data/psa/O2generatorMGM/{id_mesin}`
-   */
+  /* ------------------------------------------------------------------ */
+  /* TOPIC HELPERS                                                      */
+  /* ------------------------------------------------------------------ */
   async getAllTopics(): Promise<string[]> {
     const rows = await db('machines').select('id_mesin', 'manufacture');
     return rows.map((row: { id_mesin: string; manufacture: string }) =>
@@ -51,6 +50,9 @@ class MqttHandler {
     );
   }
 
+  /* ------------------------------------------------------------------ */
+  /* MQTT CONNECTION & HANDLERS                                         */
+  /* ------------------------------------------------------------------ */
   async connect() {
     const topics = await this.getAllTopics();
     if (!topics.length) {
@@ -60,28 +62,23 @@ class MqttHandler {
 
     this.mqttClient = Mqtt.connect(brokerUrl, options);
 
+    /* ---------------- on connect ---------------- */
     this.mqttClient.on('connect', () => {
       console.log('✅ MQTT connected');
-
       topics.forEach((topic) => {
         this.mqttClient!.subscribe(topic, (err: Error | null) => {
           if (err) console.error(`❌ Failed to subscribe: ${topic}`, err);
           else console.log(`📡 Subscribed: ${topic}`);
         });
       });
-
-      // Flush buffer global tiap menit
       setInterval(() => this.flushAllBuffers(), INSERT_INTERVAL_MS);
     });
 
+    /* ---------------- on message ---------------- */
     this.mqttClient.on('message', async (topic: string, message: Buffer) => {
       try {
         const jsonData = JSON.parse(message.toString());
-
-        // id_mesin = segmen terakhir topic kalau ada '/'
         const id_mesin: string = topic.includes('/') ? topic.split('/').pop()! : topic;
-
-        // ambil nama_dinas untuk informasi tambahan (opsional)
         const mesin = await db('machines').select('nama_dinas').where({ id_mesin }).first();
         const nama_dinas: string | null = mesin?.nama_dinas || null;
 
@@ -119,26 +116,25 @@ class MqttHandler {
               };
             })();
 
-        // Simpan data hanya satu per‑menit per‑topic
+        /* Simpan SATU data per‑topic per‑menit */
         this.buffers.set(topic, { minute: currentMinute, data });
       } catch (err) {
         console.error(`❌ Error processing MQTT message from topic ${topic}:`, err);
       }
     });
 
+    /* ---------------- on error ---------------- */
     this.mqttClient.on('error', (err: Error) => {
       console.error('❌ MQTT Error:', err.message);
     });
   }
 
-  /**
-   * Flush seluruh buffer → bulk insert ke tabel mqtt_datas
-   * lalu tampilkan log berapa baris & id_mesin apa saja yang sukses disimpan.
-   */
+  /* ------------------------------------------------------------------ */
+  /* FLUSH BUFFER → DB                                                  */
+  /* ------------------------------------------------------------------ */
   private async flushAllBuffers() {
     if (this.buffers.size === 0) return;
 
-    // ekstrak & clear buffer lebih awal untuk menghindari kehilangan data jika insert lambat
     const entries = Array.from(this.buffers.entries());
     this.buffers.clear();
 
@@ -147,23 +143,34 @@ class MqttHandler {
     try {
       const chunks = chunk(dataToInsert, CHUNK_SIZE);
       const insertedIds: string[] = [];
+      let totalInserted = 0;
 
       for (const ch of chunks) {
         /*
-         * Pada PostgreSQL, gunakan `returning('id_mesin')` untuk mendapat
-         * id_mesin yang benar‑benar tersimpan. Untuk DB lain, gunakan data
-         * pada chunk (karena insert selesai tanpa error).
+         * Berusaha pakai `returning()` (PostgreSQL). Jika gagal (DB lain),
+         * fallback insert biasa + hitung manual.
          */
-        // @ts-ignore ― Knex.PG menambahkan `.returning()`; ignore untuk DB lain.
-        const result = (db('mqtt_datas').insert(ch) as any).returning?.('id_mesin');
-        const ids = Array.isArray(result) && result.length ? result.map((r: any) => r.id_mesin) : ch.map((row: any) => row.id_mesin);
-        insertedIds.push(...ids);
+        try {
+          const result = await db('mqtt_datas').insert(ch).returning('id_mesin');
+          totalInserted += result.length;
+          insertedIds.push(...result.map((r: any) => r.id_mesin));
+        } catch (e: any) {
+          // kemungkinan DB bukan PostgreSQL ➜ coba insert biasa
+          const raw = await db('mqtt_datas').insert(ch);
+          /* Knex non‑postgres biasanya mengembalikan number of affected rows */
+          if (typeof raw === 'number') totalInserted += raw; // MySQL
+          else totalInserted += ch.length; // fallback
+          insertedIds.push(...ch.map((row: any) => row.id_mesin));
+        }
       }
 
-      // Hilangkan duplikat sambil pertahankan urutan
       const uniqueIds = [...new Set(insertedIds)];
+      console.log(`✅ Inserted ${totalInserted} rows → id_mesin: ${uniqueIds.join(', ')}`);
 
-      console.log(`✅ Inserted ${dataToInsert.length} rows → id_mesin: ${uniqueIds.join(', ')}`);
+      // DEBUG: jika totalInserted == 0, kemungkinan DB‑server read‑only / gagal silently
+      if (totalInserted === 0) {
+        console.warn('⚠️  0 rows inserted — periksa permission / read‑only mode pada DB server.');
+      }
     } catch (err) {
       console.error('❌ Failed to insert buffered data:', err);
     }
